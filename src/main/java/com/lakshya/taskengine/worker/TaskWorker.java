@@ -2,6 +2,10 @@ package com.lakshya.taskengine.worker;
 
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -15,11 +19,17 @@ import com.lakshya.taskengine.common.TaskRepository;
 public class TaskWorker {
 
     private static final Logger log = LoggerFactory.getLogger(TaskWorker.class);
-    private static final int LEASE_SECONDS = 30;
+    private static final int LEASE_SECONDS = 30; // short on purpose for testing
+    private static final int HEARTBEAT_SECONDS = 10;
 
     private final TaskRepository repository;
     private final TaskHandler handler;
     private final String workerId = "worker-" + UUID.randomUUID().toString().substring(0, 8);
+    private final ScheduledExecutorService heartbeats = Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread t = new Thread(r, "heartbeat");
+        t.setDaemon(true);
+        return t;
+    });
 
     public TaskWorker(TaskRepository repository, TaskHandler handler) {
         this.repository = repository;
@@ -35,13 +45,33 @@ public class TaskWorker {
     }
 
     private void run(Task task) {
+        ScheduledFuture<?> heartbeat = heartbeats.scheduleAtFixedRate(
+                () -> beat(task), HEARTBEAT_SECONDS, HEARTBEAT_SECONDS, TimeUnit.SECONDS);
+        Exception failure = null;
         try {
             handler.handle(task);
         } catch (Exception e) {
-            log.warn("Task {} failed on attempt {}: {}", task.id(), task.attempts(), e.toString());
-            repository.markFailed(task.id(), workerId, e.toString());
-            return;
+            failure = e;
+        } finally {
+            heartbeat.cancel(false);
         }
-        repository.markSucceeded(task.id(), workerId);
+
+        if (failure == null) {
+            repository.markSucceeded(task.id(), workerId);
+        } else {
+            log.warn("Task {} failed on attempt {}: {}", task.id(), task.attempts(), failure.toString());
+            repository.markFailed(task.id(), workerId, failure.toString());
+        }
+    }
+
+    private void beat(Task task) {
+        try {
+            boolean stillMine = repository.extendLease(task.id(), workerId, LEASE_SECONDS);
+            if (!stillMine) {
+                log.warn("Lost ownership of task {}", task.id());
+            }
+        } catch (Exception e) {
+            log.warn("Heartbeat for task {} failed: {}", task.id(), e.toString());
+        }
     }
 }

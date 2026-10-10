@@ -105,6 +105,19 @@ public class TaskRepository {
                 """)
                 .update();
     }
+    
+    public boolean extendLease(long id, String workerId, int leaseSeconds) {
+        return jdbc.sql("""
+                UPDATE tasks
+                SET lease_expires_at = now() + (:leaseSeconds * interval '1 second'),
+                    updated_at = now()
+                WHERE id = :id AND status = 'RUNNING' AND locked_by = :workerId
+                """)
+                .param("id", id)
+                .param("workerId", workerId)
+                .param("leaseSeconds", leaseSeconds)
+                .update() > 0;
+    }
 
     private static Task mapRow(ResultSet rs, int rowNum) throws SQLException {
         return new Task(
