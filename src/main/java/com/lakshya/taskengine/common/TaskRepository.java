@@ -93,6 +93,19 @@ public class TaskRepository {
                 .update();
     }
 
+    public int recoverExpiredTasks() {
+        return jdbc.sql("""
+                UPDATE tasks
+                SET status = CASE WHEN attempts >= max_attempts THEN 'DEAD' ELSE 'PENDING' END,
+                    locked_by = NULL,
+                    lease_expires_at = NULL,
+                    last_error = 'Lease expired: the worker did not finish in time',
+                    updated_at = now()
+                WHERE status = 'RUNNING' AND lease_expires_at < now()
+                """)
+                .update();
+    }
+
     private static Task mapRow(ResultSet rs, int rowNum) throws SQLException {
         return new Task(
                 rs.getLong("id"),

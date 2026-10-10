@@ -13,10 +13,14 @@ public class DemoTaskHandler implements TaskHandler {
 
     @Override
     public void handle(Task task) throws Exception {
-        if ("fail".equals(task.type())) {
-            throw new IllegalStateException("This task was designed to fail");
+        switch (task.type()) {
+            case "fail" -> throw new IllegalStateException("This task was designed to fail");
+            case "slow" -> {
+                log.info("Task {} started a slow job (20 seconds)", task.id());
+                Thread.sleep(20_000);
+            }
+            default -> Thread.sleep(1000);
         }
-        Thread.sleep(1000);
         log.info("Finished task {} of type {}", task.id(), task.type());
     }
 }
