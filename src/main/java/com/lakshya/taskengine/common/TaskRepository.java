@@ -37,6 +37,62 @@ public class TaskRepository {
                 .optional();
     }
 
+    public Optional<Task> claimNext(String workerId, int leaseSeconds) {
+        return jdbc.sql("""
+                UPDATE tasks
+                SET status = 'RUNNING',
+                    locked_by = :workerId,
+                    lease_expires_at = now() + (:leaseSeconds * interval '1 second'),
+                    attempts = attempts + 1,
+                    updated_at = now()
+                WHERE id = (
+                    SELECT id FROM tasks
+                    WHERE status = 'PENDING' AND run_at <= now()
+                    ORDER BY run_at
+                    LIMIT 1
+                    FOR UPDATE SKIP LOCKED
+                )
+                RETURNING *
+                """)
+                .param("workerId", workerId)
+                .param("leaseSeconds", leaseSeconds)
+                .query(TaskRepository::mapRow)
+                .optional();
+    }
+
+    public void markSucceeded(long id, String workerId) {
+        jdbc.sql("""
+                UPDATE tasks
+                SET status = 'SUCCEEDED',
+                    locked_by = NULL,
+                    lease_expires_at = NULL,
+                    last_error = NULL,
+                    updated_at = now()
+                WHERE id = :id AND status = 'RUNNING' AND locked_by = :workerId
+                """)
+                .param("id", id)
+                .param("workerId", workerId)
+                .update();
+    }
+
+    public void markFailed(long id, String workerId, String error) {
+        jdbc.sql("""
+                UPDATE tasks
+                SET status = CASE WHEN attempts >= max_attempts THEN 'DEAD' ELSE 'PENDING' END,
+                    run_at = CASE WHEN attempts >= max_attempts THEN run_at
+                                  ELSE now() + (power(2, attempts) * interval '1 second') END,
+                    locked_by = NULL,
+                    lease_expires_at = NULL,
+                    last_error = :error,
+                    updated_at = now()
+                WHERE id = :id AND status = 'RUNNING' AND locked_by = :workerId
+                """)
+                .param("id", id)
+                .param("workerId", workerId)
+                .param("error", error)
+                .update();
+    }
+
     private static Task mapRow(ResultSet rs, int rowNum) throws SQLException {
         return new Task(
                 rs.getLong("id"),
