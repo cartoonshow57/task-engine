@@ -6,6 +6,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -19,7 +20,7 @@ import com.lakshya.taskengine.common.TaskRepository;
 public class TaskWorker {
 
     private static final Logger log = LoggerFactory.getLogger(TaskWorker.class);
-    private static final int LEASE_SECONDS = 30; // short on purpose for testing
+    private static final int LEASE_SECONDS = 30;
     private static final int HEARTBEAT_SECONDS = 10;
 
     private final TaskRepository repository;
@@ -45,14 +46,17 @@ public class TaskWorker {
     }
 
     private void run(Task task) {
+        log.info("{} claimed task {} (attempt {})", workerId, task.id(), task.attempts());
+        AtomicBoolean finished = new AtomicBoolean(false);
         ScheduledFuture<?> heartbeat = heartbeats.scheduleAtFixedRate(
-                () -> beat(task), HEARTBEAT_SECONDS, HEARTBEAT_SECONDS, TimeUnit.SECONDS);
+                () -> beat(task, finished), HEARTBEAT_SECONDS, HEARTBEAT_SECONDS, TimeUnit.SECONDS);
         Exception failure = null;
         try {
             handler.handle(task);
         } catch (Exception e) {
             failure = e;
         } finally {
+            finished.set(true);
             heartbeat.cancel(false);
         }
 
@@ -64,10 +68,10 @@ public class TaskWorker {
         }
     }
 
-    private void beat(Task task) {
+    private void beat(Task task, AtomicBoolean finished) {
         try {
             boolean stillMine = repository.extendLease(task.id(), workerId, LEASE_SECONDS);
-            if (!stillMine) {
+            if (!stillMine && !finished.get()) {
                 log.warn("Lost ownership of task {}", task.id());
             }
         } catch (Exception e) {
