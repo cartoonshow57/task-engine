@@ -1,11 +1,12 @@
 package com.lakshya.taskengine.common;
 
 import java.time.OffsetDateTime;
+import com.fasterxml.jackson.annotation.JsonRawValue;
 
 public record Task(
         long id,
         String type,
-        String payload,
+        @JsonRawValue String payload,
         TaskStatus status,
         int attempts,
         int maxAttempts,

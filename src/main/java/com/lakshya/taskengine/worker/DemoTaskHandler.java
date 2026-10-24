@@ -13,6 +13,7 @@ public class DemoTaskHandler implements TaskHandler {
 
     @Override
     public void handle(Task task) throws Exception {
+        log.info("Task {} has payload {}", task.id(), task.payload());
         switch (task.type()) {
             case "fail" -> throw new IllegalStateException("This task was designed to fail");
             case "slow" -> {

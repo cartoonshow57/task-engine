@@ -31,7 +31,16 @@ public class TaskController {
     @ResponseStatus(HttpStatus.CREATED)
     public Map<String, Long> create(@Valid @RequestBody CreateTaskRequest request) {
         int maxAttempts = request.maxAttempts() != null ? request.maxAttempts() : 3;
-        long id = repository.insert(request.type(), "{}", maxAttempts);
+
+        String payloadJson = "{}";
+        if (request.payload() != null && !request.payload().isNull()) {
+            if (!request.payload().isObject()) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "payload must be a JSON object");
+            }
+            payloadJson = request.payload().toString();
+        }
+
+        long id = repository.insert(request.type(), payloadJson, maxAttempts);
         return Map.of("id", id);
     }
 
