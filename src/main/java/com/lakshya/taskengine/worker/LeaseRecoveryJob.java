@@ -6,8 +6,10 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import com.lakshya.taskengine.common.TaskRepository;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 
 @Component
+@ConditionalOnProperty(name = "taskengine.scheduling.enabled", havingValue = "true", matchIfMissing = true)
 public class LeaseRecoveryJob {
 
     private static final Logger log = LoggerFactory.getLogger(LeaseRecoveryJob.class);

@@ -15,8 +15,10 @@ import org.springframework.stereotype.Component;
 
 import com.lakshya.taskengine.common.Task;
 import com.lakshya.taskengine.common.TaskRepository;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 
 @Component
+@ConditionalOnProperty(name = "taskengine.scheduling.enabled", havingValue = "true", matchIfMissing = true)
 public class TaskWorker {
 
     private static final Logger log = LoggerFactory.getLogger(TaskWorker.class);
