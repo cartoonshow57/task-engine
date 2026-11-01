@@ -21,6 +21,7 @@ import org.springframework.jdbc.core.simple.JdbcClient;
 import com.lakshya.taskengine.common.Task;
 import com.lakshya.taskengine.common.TaskRepository;
 import com.lakshya.taskengine.common.TaskStatus;
+import java.time.OffsetDateTime;
 
 @Import(TestcontainersConfiguration.class)
 @SpringBootTest(properties = "taskengine.scheduling.enabled=false")
@@ -73,8 +74,9 @@ class TaskRepositoryTest {
         long id = repository.insert("send-email", "{}", 3);
         repository.claimNext("worker-1", 30);
 
-        repository.markSucceeded(id, "worker-1");
+        boolean recorded = repository.markSucceeded(id, "worker-1");
 
+        assertThat(recorded).isTrue();
         Task task = repository.findById(id).orElseThrow();
         assertThat(task.status()).isEqualTo(TaskStatus.SUCCEEDED);
         assertThat(task.lockedBy()).isNull();
@@ -85,8 +87,9 @@ class TaskRepositoryTest {
         long id = repository.insert("send-email", "{}", 3);
         repository.claimNext("worker-1", 30);
 
-        repository.markSucceeded(id, "worker-2");
+        boolean recorded = repository.markSucceeded(id, "worker-2");
 
+        assertThat(recorded).isFalse();
         Task task = repository.findById(id).orElseThrow();
         assertThat(task.status()).isEqualTo(TaskStatus.RUNNING);
         assertThat(task.lockedBy()).isEqualTo("worker-1");
@@ -182,6 +185,54 @@ class TaskRepositoryTest {
         repository.extendLease(id, "worker-1", 30); // but the worker is alive and says so
 
         assertThat(repository.recoverExpiredTasks()).isZero();
+        assertThat(repository.findById(id).orElseThrow().status()).isEqualTo(TaskStatus.RUNNING);
+    }
+
+    @Test
+    void aFailedTaskGoesBackToPendingWithALaterRunTime() {
+        long id = repository.insert("send-email", "{}", 3);
+        repository.claimNext("worker-1", 30);
+
+        boolean recorded = repository.markFailed(id, "worker-1", "boom");
+
+        assertThat(recorded).isTrue();
+        Task task = repository.findById(id).orElseThrow();
+        assertThat(task.status()).isEqualTo(TaskStatus.PENDING);
+        assertThat(task.attempts()).isEqualTo(1);
+        assertThat(task.lastError()).isEqualTo("boom");
+        assertThat(task.lockedBy()).isNull();
+        assertThat(task.runAt()).isAfter(OffsetDateTime.now());
+    }
+
+    @Test
+    void aFailedTaskWaitsForItsRetryTimeBeforeBeingClaimedAgain() {
+        long id = repository.insert("send-email", "{}", 3);
+        repository.claimNext("worker-1", 30);
+        repository.markFailed(id, "worker-1", "boom"); // retry is due in about 2 seconds
+
+        assertThat(repository.claimNext("worker-2", 30)).isEmpty();
+    }
+
+    @Test
+    void aTaskBecomesDeadAfterItsLastFailedAttempt() {
+        long id = repository.insert("send-email", "{}", 1);
+        repository.claimNext("worker-1", 30); // attempt 1 of 1
+
+        repository.markFailed(id, "worker-1", "boom");
+
+        Task task = repository.findById(id).orElseThrow();
+        assertThat(task.status()).isEqualTo(TaskStatus.DEAD);
+        assertThat(task.lastError()).isEqualTo("boom");
+    }
+
+    @Test
+    void anotherWorkerCannotRecordYourFailure() {
+        long id = repository.insert("send-email", "{}", 3);
+        repository.claimNext("worker-1", 30);
+
+        boolean recorded = repository.markFailed(id, "worker-2", "boom");
+
+        assertThat(recorded).isFalse();
         assertThat(repository.findById(id).orElseThrow().status()).isEqualTo(TaskStatus.RUNNING);
     }
 }

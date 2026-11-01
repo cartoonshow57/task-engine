@@ -60,8 +60,8 @@ public class TaskRepository {
                 .optional();
     }
 
-    public void markSucceeded(long id, String workerId) {
-        jdbc.sql("""
+    public boolean markSucceeded(long id, String workerId) {
+        return jdbc.sql("""
                 UPDATE tasks
                 SET status = 'SUCCEEDED',
                     locked_by = NULL,
@@ -72,11 +72,11 @@ public class TaskRepository {
                 """)
                 .param("id", id)
                 .param("workerId", workerId)
-                .update();
+                .update() > 0;
     }
 
-    public void markFailed(long id, String workerId, String error) {
-        jdbc.sql("""
+    public boolean markFailed(long id, String workerId, String error) {
+        return jdbc.sql("""
                 UPDATE tasks
                 SET status = CASE WHEN attempts >= max_attempts THEN 'DEAD' ELSE 'PENDING' END,
                     run_at = CASE WHEN attempts >= max_attempts THEN run_at
@@ -90,7 +90,7 @@ public class TaskRepository {
                 .param("id", id)
                 .param("workerId", workerId)
                 .param("error", error)
-                .update();
+                .update() > 0;
     }
 
     public int recoverExpiredTasks() {

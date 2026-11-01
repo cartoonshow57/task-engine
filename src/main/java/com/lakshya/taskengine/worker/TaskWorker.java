@@ -63,10 +63,14 @@ public class TaskWorker {
         }
 
         if (failure == null) {
-            repository.markSucceeded(task.id(), workerId);
+            if (!repository.markSucceeded(task.id(), workerId)) {
+                log.warn("Task {} finished, but its result was not recorded: this worker no longer owns it", task.id());
+            }
         } else {
             log.warn("Task {} failed on attempt {}: {}", task.id(), task.attempts(), failure.toString());
-            repository.markFailed(task.id(), workerId, failure.toString());
+            if (!repository.markFailed(task.id(), workerId, failure.toString())) {
+                log.warn("Task {} failed, but the failure was not recorded: this worker no longer owns it", task.id());
+            }
         }
     }
 
