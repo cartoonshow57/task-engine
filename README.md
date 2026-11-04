@@ -43,4 +43,120 @@ flowchart LR
     Repo --> DB
 ```
 
-Every copy of the app runs the same five parts: the API accepts tasks, the worker runs them, a heartbeat timer keeps the lease on a running task alive, and a recovery job releases tasks whose lease expired. All coordination goes through PostgreSQL, so the copies never talk to each other, and adding capacity means starting another copy.
+Every copy of the app runs the same four parts: the API accepts tasks, the worker runs them, a heartbeat timer keeps the lease on a running task alive, and a recovery job releases tasks whose lease expired. All coordination goes through PostgreSQL, so the copies never talk to each other, and adding capacity means starting another copy.
+
+## Running it
+
+**You need:** Java 25 and Docker (with Compose). Maven isn't needed, because the project includes the Maven wrapper.
+
+```bash
+git clone https://github.com/cartoonshow57/task-engine.git
+cd task-engine
+docker compose up -d        # starts PostgreSQL
+./mvnw spring-boot:run      # starts the app on port 8080
+```
+
+Submit a task and look at it:
+
+```bash
+curl -X POST localhost:8080/tasks -H "Content-Type: application/json" \
+  -d '{"type":"send-email","payload":{"to":"a@example.com"}}'
+# {"id":1}
+
+curl localhost:8080/tasks/1
+```
+
+The included demo handler treats every task type as a one-second job, with two exceptions: `slow` takes 20 seconds, and `fail` always fails. They're handy for trying out the failure handling below. Real task types would be added by implementing the `TaskHandler` interface.
+
+**Run several workers** by building the jar once and starting it more than once, each copy on its own port:
+
+```bash
+./mvnw -q -DskipTests package
+java -jar target/task-engine-0.0.1-SNAPSHOT.jar
+java -jar target/task-engine-0.0.1-SNAPSHOT.jar --server.port=8081
+```
+
+**Run the tests** (Docker must be running, because the tests start their own PostgreSQL):
+
+```bash
+./mvnw test
+```
+
+
+## API
+
+| Request | Body | Response |
+|---|---|---|
+| `POST /tasks` | `type` (required), `maxAttempts` (optional, at least 1, default 3), `payload` (optional JSON object) | `201` with `{"id": 1}`. `400` with the reason if the request is invalid. |
+| `GET /tasks/{id}` | none | `200` with the task, including its status, attempts, and payload. `404` if there is no such task. |
+| `GET /actuator/health` | none | `200` with a status of `UP` while the app is healthy. |
+
+## How a task moves through the system
+
+| Status | Meaning |
+|---|---|
+| `PENDING` | Waiting to be claimed. It is either new, or waiting for its retry time. |
+| `RUNNING` | Claimed by a worker, which holds a lease on it. |
+| `SUCCEEDED` | Finished. |
+| `DEAD` | Used all its attempts without succeeding. The last error is kept in `last_error`. |
+
+A worker claims the oldest due `PENDING` task, which becomes `RUNNING`. When the handler finishes, the task becomes `SUCCEEDED`. If the handler throws, the task goes back to `PENDING` with a later `run_at`, or becomes `DEAD` if no attempts are left.
+
+## How failures are handled
+
+| What goes wrong | What the engine does | Tests that prove it |
+|---|---|---|
+| A handler throws an error | The task goes back to `PENDING`, and its next try is delayed by 2s, then 4s, then 8s. The error message is saved. | `aFailedTaskGoesBackToPendingWithALaterRunTime`, `aFailedTaskWaitsForItsRetryTimeBeforeBeingClaimedAgain` |
+| A task keeps failing | After `maxAttempts` tries it becomes `DEAD` instead of retrying forever. | `aTaskBecomesDeadAfterItsLastFailedAttempt` |
+| Several workers look for work at once | The claim is a single SQL statement using `FOR UPDATE SKIP LOCKED`, so each task goes to exactly one worker. | `manyWorkersNeverClaimTheSameTask` (8 workers, 200 tasks) |
+| A worker crashes in the middle of a task | The task's lease runs out. A recovery job, which runs every 5 seconds, puts the task back in the queue. The crash costs the task one attempt, so a task that keeps killing workers ends up `DEAD`. | `expiredLeaseReturnsTheTaskToPending`, `aTaskWithNoAttemptsLeftBecomesDeadWhenItsLeaseExpires` |
+| A worker is slow but still alive | While a task runs, a heartbeat keeps extending its lease, so the recovery job leaves it alone. | `aHeartbeatSavesTheTaskFromRecovery`, `aTaskWithAValidLeaseIsLeftAlone` |
+| A worker reports on a task it no longer owns | Every update checks that the task is still `RUNNING` and still owned by that worker. If not, nothing changes and the worker logs a warning. | `anotherWorkerCannotFinishYourTask`, `anotherWorkerCannotRecordYourFailure`, `onlyTheOwnerCanExtendALease` |
+| A client sends an invalid request | The API answers `400` and says which field was wrong and why. | Checked by hand. The HTTP layer has no automated tests yet. |
+
+I also checked these cases by hand. I killed the app with `kill -9` in the middle of a task and restarted it. The recovery job put the task back, and it finished on its second attempt. With a 10-second lease and a 20-second task, the task ran three times and ended `DEAD` before the heartbeat existed. With the heartbeat, the same task ran once and succeeded. With two copies of the app working through six slow tasks, each task was claimed exactly once, in about half the time one copy needs.
+
+### Delivery guarantee
+
+The engine delivers **at least once**. If a worker freezes after doing the work but before recording it, the lease expires and the task runs again. Handlers should therefore be safe to repeat. Almost all task systems make this trade, because losing a task is usually worse than running it twice. Exactly-once execution cannot be guaranteed when a task has effects outside the database, such as sending an email.
+
+## Design decisions
+
+- **PostgreSQL as the queue.** It is one dependency, and the claim and the status change happen in one transaction. `FOR UPDATE SKIP LOCKED` is built for this pattern. The cost is that workers poll, and that queue traffic shares a database with the rest of the data.
+- **Leases, not long locks.** The database row lock is held only for the milliseconds a claim takes. While a task runs, ownership is recorded in the row itself (`locked_by`, `lease_expires_at`), and the lease says when to give up on a worker.
+- **A heartbeat on its own thread.** The worker thread is busy inside the handler, so a separate timer extends the lease. It stops before the result is recorded, and a late beat after the task has finished is ignored.
+- **One SQL statement for each state change.** Claiming, finishing, failing, extending a lease, and recovering all happen in a single `UPDATE` with a guard in its `WHERE` clause. There is no gap between "check" and "change" for another worker to slip into.
+- **At least once, not exactly once.** See the delivery guarantee above.
+- **JSON payloads stored as `jsonb`.** PostgreSQL rejects anything that is not valid JSON, and the API only accepts a JSON object.
+
+## Configuration
+
+| Setting | Default | Effect |
+|---|---|---|
+| `taskengine.scheduling.enabled` | `true` | When `false`, the worker and the recovery job are not created. The tests use this, and it also gives an API-only copy of the app. |
+| `server.port` | `8080` | The port of the web server. Use a different one for each copy. |
+| `spring.datasource.*` | local Docker PostgreSQL | The database connection (see `application.properties`). |
+
+## Project layout
+
+```
+src/main/java/com/lakshya/taskengine/
+  api/      TaskController, CreateTaskRequest, ApiExceptionHandler
+  common/   Task, TaskStatus, TaskRepository
+  worker/   TaskWorker, TaskHandler, DemoTaskHandler, LeaseRecoveryJob
+src/main/resources/db/migration/
+            V1__create_tasks_table.sql
+src/test/java/com/lakshya/taskengine/
+            TaskRepositoryTest, TestcontainersConfiguration
+.github/workflows/ci.yml
+docker-compose.yml
+```
+
+## Known limitations and next steps
+
+- **No idempotency keys yet.** A client that retries `POST /tasks` after a timeout can create a duplicate task.
+- **No metrics or load test yet.** There are no throughput or latency numbers.
+- **Tests cover the repository.** The HTTP endpoints and the worker loop are not covered by automated tests.
+- **Finished tasks stay in the table.** At scale they would need archiving or partitioning.
+- **Retries have no jitter.** At scale, tasks that fail together would retry together.
+- **Polling.** Workers ask for work once a second. At larger scale, I would look at `LISTEN`/`NOTIFY` or a message broker, and at separate queues for different task types.
