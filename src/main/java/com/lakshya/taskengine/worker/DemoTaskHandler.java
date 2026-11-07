@@ -20,6 +20,7 @@ public class DemoTaskHandler implements TaskHandler {
                 log.info("Task {} started a slow job (20 seconds)", task.id());
                 Thread.sleep(20_000);
             }
+            case "noop" -> { }
             default -> Thread.sleep(1000);
         }
         log.info("Finished task {} of type {}", task.id(), task.type());

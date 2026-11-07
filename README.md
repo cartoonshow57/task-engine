@@ -137,6 +137,28 @@ The engine delivers **at least once**. If a worker freezes after doing the work 
 | `server.port` | `8080` | The port of the web server. Use a different one for each copy. |
 | `spring.datasource.*` | local Docker PostgreSQL | The database connection (see `application.properties`). |
 
+
+## Performance
+
+Measured with `scripts/loadtest.sh` on a laptop, with the app and PostgreSQL (in Docker) on the same machine. The script empties the `tasks` table, queues 10,000 `noop` tasks (the handler does nothing, so the test measures the engine itself), waits for all of them to finish, and divides by the time between the first and last completion. **It deletes every task in the database**, so use it only on a development database.
+
+| Workers | Commit mode | Tasks per second |
+|---|---|---|
+| 1 | PostgreSQL default | 49 to 51 (two runs) |
+| 2 | PostgreSQL default | 53 |
+| 4 | PostgreSQL default | 95 |
+| 1 | `synchronous_commit = off` (diagnosis only) | 1,092 |
+
+What the numbers show:
+
+- Each task takes two commits, one to claim it and one to record the result, and by default each commit waits for PostgreSQL to write it safely to disk. That wait is most of the cost: turning it off made one worker about 22 times faster.
+- With the default setting, more workers help because their waits overlap. Four workers were about 1.9 times as fast as one. The two-worker run was only 8% faster than one worker and was not repeated.
+- A two-worker run that started right after a large `DELETE` managed 33 tasks per second, against 53 from a clean start, which suggests that leftover row versions slowed it down. The script uses `TRUNCATE` so every run starts clean.
+- `synchronous_commit = off` can lose the most recent commits if PostgreSQL crashes, so it was used only to find the bottleneck. With at-least-once delivery, losing the record that a task finished would only make it run again, but losing a freshly submitted task would lose work.
+
+These are laptop numbers for tasks that do nothing. They show how the engine behaves, not what a production deployment would reach.
+
+
 ## Project layout
 
 ```
@@ -150,12 +172,13 @@ src/test/java/com/lakshya/taskengine/
             TaskRepositoryTest, TestcontainersConfiguration
 .github/workflows/ci.yml
 docker-compose.yml
+scripts/loadtest.sh
 ```
 
 ## Known limitations and next steps
 
 - **No idempotency keys yet.** A client that retries `POST /tasks` after a timeout can create a duplicate task.
-- **No metrics or load test yet.** There are no throughput or latency numbers.
+- **No metrics yet.** The load test measures throughput from outside, but the app doesn't expose counters, timings, or queue depth.
 - **Tests cover the repository.** The HTTP endpoints and the worker loop are not covered by automated tests.
 - **Finished tasks stay in the table.** At scale they would need archiving or partitioning.
 - **Retries have no jitter.** At scale, tasks that fail together would retry together.
