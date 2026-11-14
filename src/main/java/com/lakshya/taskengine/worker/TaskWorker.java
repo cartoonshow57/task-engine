@@ -10,12 +10,15 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
+import com.lakshya.taskengine.common.EngineMetrics;
 import com.lakshya.taskengine.common.Task;
 import com.lakshya.taskengine.common.TaskRepository;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+
+import io.micrometer.core.instrument.Timer;
 
 @Component
 @ConditionalOnProperty(name = "taskengine.scheduling.enabled", havingValue = "true", matchIfMissing = true)
@@ -27,6 +30,7 @@ public class TaskWorker {
 
     private final TaskRepository repository;
     private final TaskHandler handler;
+    private final EngineMetrics metrics;
     private final String workerId = "worker-" + UUID.randomUUID().toString().substring(0, 8);
     private final ScheduledExecutorService heartbeats = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "heartbeat");
@@ -34,9 +38,10 @@ public class TaskWorker {
         return t;
     });
 
-    public TaskWorker(TaskRepository repository, TaskHandler handler) {
+    public TaskWorker(TaskRepository repository, TaskHandler handler, EngineMetrics metrics) {
         this.repository = repository;
         this.handler = handler;
+        this.metrics = metrics;
     }
 
     @Scheduled(fixedDelay = 1000)
@@ -49,9 +54,11 @@ public class TaskWorker {
 
     private void run(Task task) {
         log.info("{} claimed task {} (attempt {})", workerId, task.id(), task.attempts());
+        metrics.taskClaimed();
         AtomicBoolean finished = new AtomicBoolean(false);
         ScheduledFuture<?> heartbeat = heartbeats.scheduleAtFixedRate(
                 () -> beat(task, finished), HEARTBEAT_SECONDS, HEARTBEAT_SECONDS, TimeUnit.SECONDS);
+        Timer.Sample sample = metrics.startTimer();
         Exception failure = null;
         try {
             handler.handle(task);
@@ -60,15 +67,22 @@ public class TaskWorker {
         } finally {
             finished.set(true);
             heartbeat.cancel(false);
+            metrics.stopTimer(sample);
         }
 
         if (failure == null) {
-            if (!repository.markSucceeded(task.id(), workerId)) {
+            if (repository.markSucceeded(task.id(), workerId)) {
+                metrics.taskSucceeded();
+            } else {
+                metrics.resultLost();
                 log.warn("Task {} finished, but its result was not recorded: this worker no longer owns it", task.id());
             }
         } else {
             log.warn("Task {} failed on attempt {}: {}", task.id(), task.attempts(), failure.toString());
-            if (!repository.markFailed(task.id(), workerId, failure.toString())) {
+            if (repository.markFailed(task.id(), workerId, failure.toString())) {
+                metrics.taskFailed();
+            } else {
+                metrics.resultLost();
                 log.warn("Task {} failed, but the failure was not recorded: this worker no longer owns it", task.id());
             }
         }

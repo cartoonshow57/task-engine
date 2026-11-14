@@ -4,6 +4,8 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.OffsetDateTime;
 import java.util.Optional;
+import java.util.EnumMap;
+import java.util.Map;
 
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Repository;
@@ -104,6 +106,15 @@ public class TaskRepository {
                 WHERE status = 'RUNNING' AND lease_expires_at < now()
                 """)
                 .update();
+    }
+
+    public Map<TaskStatus, Long> countByStatus() {
+        Map<TaskStatus, Long> counts = new EnumMap<>(TaskStatus.class);
+        jdbc.sql("SELECT status, count(*) AS n FROM tasks GROUP BY status")
+                .query((rs, rowNum) -> Map.entry(TaskStatus.valueOf(rs.getString("status")), rs.getLong("n")))
+                .list()
+                .forEach(entry -> counts.put(entry.getKey(), entry.getValue()));
+        return counts;
     }
     
     public boolean extendLease(long id, String workerId, int leaseSeconds) {

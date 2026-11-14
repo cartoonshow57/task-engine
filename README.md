@@ -136,6 +136,7 @@ The engine delivers **at least once**. If a worker freezes after doing the work 
 | `taskengine.scheduling.enabled` | `true` | When `false`, the worker and the recovery job are not created. The tests use this, and it also gives an API-only copy of the app. |
 | `server.port` | `8080` | The port of the web server. Use a different one for each copy. |
 | `spring.datasource.*` | local Docker PostgreSQL | The database connection (see `application.properties`). |
+| `management.endpoints.web.exposure.include` | `health,metrics` | Which Actuator endpoints are reachable over HTTP. |
 
 
 ## Performance
@@ -159,12 +160,31 @@ What the numbers show:
 These are laptop numbers for tasks that do nothing. They show how the engine behaves, not what a production deployment would reach.
 
 
+## Metrics
+
+The app reports metrics through Spring Boot Actuator and Micrometer at `/actuator/metrics`. Spring provides the JVM, database connection pool, and web request metrics. The engine adds its own:
+
+| Metric | Kind | What it shows |
+|---|---|---|
+| `taskengine.tasks.claimed` | counter | Tasks this app's worker claimed |
+| `taskengine.tasks.succeeded` | counter | Tasks it finished successfully |
+| `taskengine.tasks.failed` | counter | Failed attempts it recorded |
+| `taskengine.tasks.lost.results` | counter | Results not recorded because the worker no longer owned the task |
+| `taskengine.tasks.recovered` | counter | Tasks released after their lease expired |
+| `taskengine.handler.time` | timer | How long the handler takes to run a task |
+| `taskengine.tasks` (tag `status`) | gauge | Tasks currently in each status: `pending`, `running`, `succeeded`, `dead`. Refreshed every 5 seconds |
+
+The counters and the timer count only what one copy of the app does, so with several copies a monitoring system adds them up. The `taskengine.tasks` gauge reads the shared database, so every copy reports the same totals. `scripts/metrics.sh [port]` prints the main meters of a running copy.
+
+In a load test of 3,000 `noop` tasks, the handler timer recorded 0.024 seconds in total, about 8 microseconds per task. At the measured rate of about 50 tasks per second, each task takes around 20 milliseconds from claim to result, so almost all of the engine's time goes on database round trips. This matches the commit-wait finding in the Performance section.
+
+
 ## Project layout
 
 ```
 src/main/java/com/lakshya/taskengine/
   api/      TaskController, CreateTaskRequest, ApiExceptionHandler
-  common/   Task, TaskStatus, TaskRepository
+  common/   Task, TaskStatus, TaskRepository, EngineMetrics, QueueDepthMetrics
   worker/   TaskWorker, TaskHandler, DemoTaskHandler, LeaseRecoveryJob
 src/main/resources/db/migration/
             V1__create_tasks_table.sql
@@ -173,12 +193,14 @@ src/test/java/com/lakshya/taskengine/
 .github/workflows/ci.yml
 docker-compose.yml
 scripts/loadtest.sh
+scripts/metrics.sh
 ```
 
 ## Known limitations and next steps
 
 - **No idempotency keys yet.** A client that retries `POST /tasks` after a timeout can create a duplicate task.
-- **No metrics yet.** The load test measures throughput from outside, but the app doesn't expose counters, timings, or queue depth.
+- **Metrics are only available through the Actuator endpoint.** There is no Prometheus export, dashboard, or alerting yet.
+- **No authentication.** The API and the Actuator endpoints are open, which is fine on a laptop but not on a server.
 - **Tests cover the repository.** The HTTP endpoints and the worker loop are not covered by automated tests.
 - **Finished tasks stay in the table.** At scale they would need archiving or partitioning.
 - **Retries have no jitter.** At scale, tasks that fail together would retry together.
