@@ -2,6 +2,7 @@ package com.lakshya.taskengine;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.util.Map;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -234,5 +235,28 @@ class TaskRepositoryTest {
 
         assertThat(recorded).isFalse();
         assertThat(repository.findById(id).orElseThrow().status()).isEqualTo(TaskStatus.RUNNING);
+    }
+
+    @Test
+    void countByStatusCountsEachStatus() {
+        repository.insert("a", "{}", 3);
+        repository.insert("b", "{}", 3);
+        repository.insert("c", "{}", 3);
+        long first = repository.claimNext("worker-1", 30).orElseThrow().id();
+        repository.markSucceeded(first, "worker-1");
+        repository.claimNext("worker-1", 30); // a second task is now running
+
+        Map<TaskStatus, Long> counts = repository.countByStatus();
+
+        assertThat(counts)
+                .containsEntry(TaskStatus.PENDING, 1L)
+                .containsEntry(TaskStatus.RUNNING, 1L)
+                .containsEntry(TaskStatus.SUCCEEDED, 1L)
+                .doesNotContainKey(TaskStatus.DEAD);
+    }
+
+    @Test
+    void countByStatusIsEmptyWhenThereAreNoTasks() {
+        assertThat(repository.countByStatus()).isEmpty();
     }
 }
