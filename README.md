@@ -14,6 +14,7 @@ Built with Java 25, Spring Boot, PostgreSQL, Flyway, and Testcontainers.
 - **Leases and heartbeats.** A claimed task is leased to one worker, and the worker keeps extending the lease while it runs. If the worker dies, the lease expires and a recovery job puts the task back in the queue.
 - **Ownership checks.** A worker that has lost its task cannot overwrite the new owner's result, and it logs a warning.
 - **Tested.** Automated tests run against a real PostgreSQL in Docker, including eight workers racing for 200 tasks, and the build runs on every push with GitHub Actions.
+- **Idempotency keys.** A client can send an `Idempotency-Key` header, so retrying a request after a timeout returns the original task instead of creating a duplicate. A unique index in PostgreSQL enforces this, even when retries arrive at the same instant.
 
 
 ## Architecture
@@ -87,7 +88,7 @@ java -jar target/task-engine-0.0.1-SNAPSHOT.jar --server.port=8081
 
 | Request | Body | Response |
 |---|---|---|
-| `POST /tasks` | `type` (required), `maxAttempts` (optional, at least 1, default 3), `payload` (optional JSON object) | `201` with `{"id": 1}`. `400` with the reason if the request is invalid. |
+| `POST /tasks` | `type` (required), `maxAttempts` (optional, at least 1, default 3), `payload` (optional JSON object). Optional header `Idempotency-Key` (up to 200 characters). | `201` with `{"id": 1}` for a new task. `200` with the original id if the same key and request were already seen. `422` if the key was used for a different request. `400` with the reason if the request is invalid. |
 | `GET /tasks/{id}` | none | `200` with the task, including its status, attempts, and payload. `404` if there is no such task. |
 | `GET /actuator/health` | none | `200` with a status of `UP` while the app is healthy. |
 
@@ -113,12 +114,13 @@ A worker claims the oldest due `PENDING` task, which becomes `RUNNING`. When the
 | A worker is slow but still alive | While a task runs, a heartbeat keeps extending its lease, so the recovery job leaves it alone. | `aHeartbeatSavesTheTaskFromRecovery`, `aTaskWithAValidLeaseIsLeftAlone` |
 | A worker reports on a task it no longer owns | Every update checks that the task is still `RUNNING` and still owned by that worker. If not, nothing changes and the worker logs a warning. | `anotherWorkerCannotFinishYourTask`, `anotherWorkerCannotRecordYourFailure`, `onlyTheOwnerCanExtendALease` |
 | A client sends an invalid request | The API answers `400` and says which field was wrong and why. | `emptyTypeIsRejectedAndNamesTheField`, `maxAttemptsBelowOneIsRejected`, `payloadThatIsNotAnObjectIsRejected` |
+| A client retries a request, for example after a timeout | With an `Idempotency-Key` header, the engine returns the original task instead of creating a second one. A unique index makes this hold even when retries arrive at the same instant. | `sameKeyTwiceCreatesOnlyOneTask`, `manyIdenticalRequestsAtTheSameInstantCreateOneTask`, `repeatedKeyReturnsTheSameTaskWith200`, `reusedKeyWithADifferentRequestIsRejectedWith422` |
 
 I also checked these cases by hand. I killed the app with `kill -9` in the middle of a task and restarted it. The recovery job put the task back, and it finished on its second attempt. With a 10-second lease and a 20-second task, the task ran three times and ended `DEAD` before the heartbeat existed. With the heartbeat, the same task ran once and succeeded. With two copies of the app working through six slow tasks, each task was claimed exactly once, in about half the time one copy needs.
 
 ### Delivery guarantee
 
-The engine delivers **at least once**. If a worker freezes after doing the work but before recording it, the lease expires and the task runs again. Handlers should therefore be safe to repeat. Almost all task systems make this trade, because losing a task is usually worse than running it twice. Exactly-once execution cannot be guaranteed when a task has effects outside the database, such as sending an email.
+The engine delivers **at least once**. If a worker freezes after doing the work but before recording it, the lease expires and the task runs again. Handlers should therefore be safe to repeat. Almost all task systems make this trade, because losing a task is usually worse than running it twice. Exactly-once execution cannot be guaranteed when a task has effects outside the database, such as sending an email. Idempotency keys protect against duplicate submissions, but they don't change this guarantee: a task that is claimed twice, for example after a worker freezes, still runs twice.
 
 ## Design decisions
 
@@ -128,6 +130,7 @@ The engine delivers **at least once**. If a worker freezes after doing the work 
 - **One SQL statement for each state change.** Claiming, finishing, failing, extending a lease, and recovering all happen in a single `UPDATE` with a guard in its `WHERE` clause. There is no gap between "check" and "change" for another worker to slip into.
 - **At least once, not exactly once.** See the delivery guarantee above.
 - **JSON payloads stored as `jsonb`.** PostgreSQL rejects anything that is not valid JSON, and the API only accepts a JSON object.
+- **Idempotency through a unique index.** The key is a header, because it identifies the request and isn't part of the task's data. The check is `INSERT ... ON CONFLICT DO NOTHING` against a unique index, so PostgreSQL decides the winner when identical requests collide. A repeat gets `200` and the original id, a reused key with a different request gets `422`, and tasks without a key are unaffected.
 
 ## Configuration
 
@@ -187,7 +190,7 @@ src/main/java/com/lakshya/taskengine/
   common/   Task, TaskStatus, TaskRepository, EngineMetrics, QueueDepthMetrics
   worker/   TaskWorker, TaskHandler, DemoTaskHandler, LeaseRecoveryJob
 src/main/resources/db/migration/
-            V1__create_tasks_table.sql
+            V1__create_tasks_table.sql, V2__add_idempotency_key.sql
 src/test/java/com/lakshya/taskengine/
             TaskRepositoryTest, TaskApiTest, TestcontainersConfiguration
             common/EngineMetricsTest
@@ -199,7 +202,7 @@ scripts/metrics.sh
 
 ## Known limitations and next steps
 
-- **No idempotency keys yet.** A client that retries `POST /tasks` after a timeout can create a duplicate task.
+- **Idempotency keys never expire.** A key stays with its task for as long as the task is stored, and there is no cleanup yet.
 - **Metrics are only available through the Actuator endpoint.** There is no Prometheus export, dashboard, or alerting yet.
 - **No authentication.** The API and the Actuator endpoints are open, which is fine on a laptop but not on a server.
 - - **The worker loop has no automated tests of its own.** The repository, the HTTP endpoints, and the metrics are tested. The worker and the recovery job are covered only through the repository methods they call.

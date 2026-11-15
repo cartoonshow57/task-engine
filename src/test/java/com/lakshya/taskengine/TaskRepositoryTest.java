@@ -23,6 +23,7 @@ import com.lakshya.taskengine.common.Task;
 import com.lakshya.taskengine.common.TaskRepository;
 import com.lakshya.taskengine.common.TaskStatus;
 import java.time.OffsetDateTime;
+import com.lakshya.taskengine.common.TaskRepository.InsertResult;
 
 @Import(TestcontainersConfiguration.class)
 @SpringBootTest(properties = "taskengine.scheduling.enabled=false")
@@ -258,5 +259,74 @@ class TaskRepositoryTest {
     @Test
     void countByStatusIsEmptyWhenThereAreNoTasks() {
         assertThat(repository.countByStatus()).isEmpty();
+    }
+
+    @Test
+    void sameKeyTwiceCreatesOnlyOneTask() {
+        InsertResult first = repository.insert("send-email", "{}", 3, "key-1");
+        InsertResult second = repository.insert("send-email", "{}", 3, "key-1");
+
+        assertThat(first.created()).isTrue();
+        assertThat(second.created()).isFalse();
+        assertThat(second.id()).isEqualTo(first.id());
+        assertThat(repository.countByStatus()).containsEntry(TaskStatus.PENDING, 1L);
+    }
+
+    @Test
+    void differentKeysCreateDifferentTasks() {
+        InsertResult a = repository.insert("send-email", "{}", 3, "key-a");
+        InsertResult b = repository.insert("send-email", "{}", 3, "key-b");
+
+        assertThat(a.created()).isTrue();
+        assertThat(b.created()).isTrue();
+        assertThat(a.id()).isNotEqualTo(b.id());
+    }
+
+    @Test
+    void tasksWithoutAKeyAreAlwaysCreated() {
+        InsertResult a = repository.insert("send-email", "{}", 3, null);
+        InsertResult b = repository.insert("send-email", "{}", 3, null);
+
+        assertThat(a.created()).isTrue();
+        assertThat(b.created()).isTrue();
+        assertThat(a.id()).isNotEqualTo(b.id());
+    }
+
+    @Test
+    void matchesRequestComparesTypePayloadAndAttempts() {
+        long id = repository.insert("send-email", "{\"to\":\"a@example.com\",\"x\":1}", 3);
+
+        // the same payload with different spacing and key order still matches
+        assertThat(repository.matchesRequest(id, "send-email", "{\"x\": 1, \"to\": \"a@example.com\"}", 3)).isTrue();
+        assertThat(repository.matchesRequest(id, "send-sms", "{\"to\":\"a@example.com\",\"x\":1}", 3)).isFalse();
+        assertThat(repository.matchesRequest(id, "send-email", "{}", 3)).isFalse();
+        assertThat(repository.matchesRequest(id, "send-email", "{\"to\":\"a@example.com\",\"x\":1}", 5)).isFalse();
+    }
+
+    @Test
+    void manyIdenticalRequestsAtTheSameInstantCreateOneTask() throws Exception {
+        int requests = 16;
+        ExecutorService pool = Executors.newFixedThreadPool(requests);
+        CountDownLatch startingGun = new CountDownLatch(1);
+        List<Future<InsertResult>> futures = new ArrayList<>();
+
+        for (int i = 0; i < requests; i++) {
+            futures.add(pool.submit(() -> {
+                startingGun.await();
+                return repository.insert("send-email", "{}", 3, "same-key");
+            }));
+        }
+
+        startingGun.countDown();
+
+        List<InsertResult> results = new ArrayList<>();
+        for (Future<InsertResult> future : futures) {
+            results.add(future.get(30, TimeUnit.SECONDS));
+        }
+        pool.shutdown();
+
+        assertThat(results).filteredOn(InsertResult::created).hasSize(1);
+        assertThat(results).extracting(InsertResult::id).containsOnly(results.get(0).id());
+        assertThat(repository.countByStatus()).containsEntry(TaskStatus.PENDING, 1L);
     }
 }

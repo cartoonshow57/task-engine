@@ -55,6 +55,19 @@ class TaskApiTest {
                 .getResponseBody();
     }
 
+    private String post(String key, String json, int expectedStatus) {
+        return client.post()
+                .uri(url("/tasks"))
+                .header("Idempotency-Key", key)
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(json)
+                .exchange()
+                .expectStatus().isEqualTo(expectedStatus)
+                .expectBody(String.class)
+                .returnResult()
+                .getResponseBody();
+    }
+
     @Test
     void createTaskReturns201AndSavesAPendingTask() {
         String body = client.post()
@@ -137,5 +150,32 @@ class TaskApiTest {
                 .getResponseBody();
 
         assertThat(body).contains("Task not found");
+    }
+
+    @Test
+    void repeatedKeyReturnsTheSameTaskWith200() {
+        String first = post("key-1", "{\"type\":\"send-email\"}", 201);
+        String second = post("key-1", "{\"type\":\"send-email\"}", 200);
+
+        assertThat(second).isEqualTo(first);
+        assertThat(repository.countByStatus()).containsEntry(TaskStatus.PENDING, 1L);
+    }
+
+    @Test
+    void reusedKeyWithADifferentRequestIsRejectedWith422() {
+        post("key-1", "{\"type\":\"send-email\"}", 201);
+
+        String body = post("key-1", "{\"type\":\"send-sms\"}", 422);
+
+        assertThat(body).contains("different request");
+        assertThat(repository.countByStatus()).containsEntry(TaskStatus.PENDING, 1L);
+    }
+
+    @Test
+    void aTooLongKeyIsRejected() {
+        String body = post("k".repeat(201), "{\"type\":\"send-email\"}", 400);
+
+        assertThat(body).contains("at most 200 characters");
+        assertThat(repository.countByStatus()).isEmpty();
     }
 }

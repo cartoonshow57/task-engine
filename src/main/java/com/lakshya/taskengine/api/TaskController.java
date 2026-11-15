@@ -3,23 +3,28 @@ package com.lakshya.taskengine.api;
 import java.util.Map;
 
 import org.springframework.http.HttpStatus;
+import org.springframework.http.HttpStatusCode;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 
 import com.lakshya.taskengine.common.Task;
 import com.lakshya.taskengine.common.TaskRepository;
+import com.lakshya.taskengine.common.TaskRepository.InsertResult;
 
 import jakarta.validation.Valid;
 
 @RestController
 @RequestMapping("/tasks")
 public class TaskController {
+
+    private static final int MAX_KEY_LENGTH = 200;
 
     private final TaskRepository repository;
 
@@ -28,8 +33,9 @@ public class TaskController {
     }
 
     @PostMapping
-    @ResponseStatus(HttpStatus.CREATED)
-    public Map<String, Long> create(@Valid @RequestBody CreateTaskRequest request) {
+    public ResponseEntity<Map<String, Long>> create(
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+            @Valid @RequestBody CreateTaskRequest request) {
         int maxAttempts = request.maxAttempts() != null ? request.maxAttempts() : 3;
 
         String payloadJson = "{}";
@@ -40,8 +46,28 @@ public class TaskController {
             payloadJson = request.payload().toString();
         }
 
-        long id = repository.insert(request.type(), payloadJson, maxAttempts);
-        return Map.of("id", id);
+        if (idempotencyKey == null) {
+            long id = repository.insert(request.type(), payloadJson, maxAttempts);
+            return ResponseEntity.status(HttpStatus.CREATED).body(Map.of("id", id));
+        }
+
+        if (idempotencyKey.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Idempotency-Key must not be blank");
+        }
+        if (idempotencyKey.length() > MAX_KEY_LENGTH) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Idempotency-Key must be at most " + MAX_KEY_LENGTH + " characters");
+        }
+
+        InsertResult result = repository.insert(request.type(), payloadJson, maxAttempts, idempotencyKey);
+        if (result.created()) {
+            return ResponseEntity.status(HttpStatus.CREATED).body(Map.of("id", result.id()));
+        }
+        if (!repository.matchesRequest(result.id(), request.type(), payloadJson, maxAttempts)) {
+            throw new ResponseStatusException(HttpStatusCode.valueOf(422),
+                    "Idempotency-Key was already used for a different request");
+        }
+        return ResponseEntity.ok(Map.of("id", result.id()));
     }
 
     @GetMapping("/{id}")

@@ -6,6 +6,7 @@ import java.time.OffsetDateTime;
 import java.util.Optional;
 import java.util.EnumMap;
 import java.util.Map;
+import java.sql.Types;
 
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Repository;
@@ -30,6 +31,45 @@ public class TaskRepository {
                 .param("maxAttempts", maxAttempts)
                 .query(Long.class)
                 .single();
+    }
+
+    public record InsertResult(long id, boolean created) {}
+
+    public InsertResult insert(String type, String payloadJson, int maxAttempts, String idempotencyKey) {
+        Optional<Long> inserted = jdbc.sql("""
+                INSERT INTO tasks (type, payload, max_attempts, idempotency_key)
+                VALUES (:type, CAST(:payload AS jsonb), :maxAttempts, :key)
+                ON CONFLICT (idempotency_key) DO NOTHING
+                RETURNING id
+                """)
+                .param("type", type)
+                .param("payload", payloadJson)
+                .param("maxAttempts", maxAttempts)
+                .param("key", idempotencyKey, Types.VARCHAR)
+                .query(Long.class)
+                .optional();
+        if (inserted.isPresent()) {
+            return new InsertResult(inserted.get(), true);
+        }
+        long existing = jdbc.sql("SELECT id FROM tasks WHERE idempotency_key = :key")
+                .param("key", idempotencyKey)
+                .query(Long.class)
+                .single();
+        return new InsertResult(existing, false);
+    }
+
+    public boolean matchesRequest(long id, String type, String payloadJson, int maxAttempts) {
+        return jdbc.sql("""
+                SELECT count(*) FROM tasks
+                WHERE id = :id AND type = :type AND payload = CAST(:payload AS jsonb)
+                  AND max_attempts = :maxAttempts
+                """)
+                .param("id", id)
+                .param("type", type)
+                .param("payload", payloadJson)
+                .param("maxAttempts", maxAttempts)
+                .query(Long.class)
+                .single() > 0;
     }
 
     public Optional<Task> findById(long id) {
