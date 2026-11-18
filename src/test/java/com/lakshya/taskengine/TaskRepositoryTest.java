@@ -329,4 +329,30 @@ class TaskRepositoryTest {
         assertThat(results).extracting(InsertResult::id).containsOnly(results.get(0).id());
         assertThat(repository.countByStatus()).containsEntry(TaskStatus.PENDING, 1L);
     }
+
+    @Test
+    void aDelayedTaskIsNotClaimedUntilItIsDue() {
+        long id = repository.insert("send-email", "{}", 3, 60, null).id();
+
+        assertThat(repository.claimNext("worker-1", 30)).isEmpty();
+
+        Task task = repository.findById(id).orElseThrow();
+        assertThat(task.status()).isEqualTo(TaskStatus.PENDING);
+        assertThat(task.runAt()).isAfter(OffsetDateTime.now().plusSeconds(50));
+    }
+
+    @Test
+    void aTaskWithNoDelayIsDueAtOnce() {
+        long id = repository.insert("send-email", "{}", 3, 0, null).id();
+
+        assertThat(repository.claimNext("worker-1", 30).orElseThrow().id()).isEqualTo(id);
+    }
+
+    @Test
+    void aDelayedTaskDoesNotBlockTheTasksBehindIt() {
+        repository.insert("later", "{}", 3, 60, null);
+        long soon = repository.insert("now", "{}", 3, 0, null).id();
+
+        assertThat(repository.claimNext("worker-1", 30).orElseThrow().id()).isEqualTo(soon);
+    }
 }

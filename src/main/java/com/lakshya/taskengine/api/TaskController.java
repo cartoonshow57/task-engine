@@ -37,6 +37,7 @@ public class TaskController {
             @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
             @Valid @RequestBody CreateTaskRequest request) {
         int maxAttempts = request.maxAttempts() != null ? request.maxAttempts() : 3;
+        int delaySeconds = request.delaySeconds() != null ? request.delaySeconds() : 0;
 
         String payloadJson = "{}";
         if (request.payload() != null && !request.payload().isNull()) {
@@ -47,7 +48,7 @@ public class TaskController {
         }
 
         if (idempotencyKey == null) {
-            long id = repository.insert(request.type(), payloadJson, maxAttempts);
+            long id = repository.insert(request.type(), payloadJson, maxAttempts, delaySeconds, null).id();
             return ResponseEntity.status(HttpStatus.CREATED).body(Map.of("id", id));
         }
 
@@ -59,7 +60,8 @@ public class TaskController {
                     "Idempotency-Key must be at most " + MAX_KEY_LENGTH + " characters");
         }
 
-        InsertResult result = repository.insert(request.type(), payloadJson, maxAttempts, idempotencyKey);
+        InsertResult result = repository.insert(request.type(), payloadJson, maxAttempts, delaySeconds,
+                idempotencyKey);
         if (result.created()) {
             return ResponseEntity.status(HttpStatus.CREATED).body(Map.of("id", result.id()));
         }

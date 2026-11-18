@@ -178,4 +178,33 @@ class TaskApiTest {
         assertThat(body).contains("at most 200 characters");
         assertThat(repository.countByStatus()).isEmpty();
     }
+
+    @Test
+    void delaySecondsSchedulesTheTaskForLater() {
+        client.post()
+                .uri(url("/tasks"))
+                .contentType(MediaType.APPLICATION_JSON)
+                .body("{\"type\":\"send-email\",\"delaySeconds\":3600}")
+                .exchange()
+                .expectStatus().isCreated();
+
+        assertThat(repository.countByStatus()).containsEntry(TaskStatus.PENDING, 1L);
+        assertThat(repository.claimNext("worker-1", 30)).isEmpty();
+    }
+
+    @Test
+    void aNegativeDelayIsRejected() {
+        String body = postExpectingBadRequest("{\"type\":\"send-email\",\"delaySeconds\":-5}");
+
+        assertThat(body).contains("delaySeconds");
+        assertThat(repository.countByStatus()).isEmpty();
+    }
+
+    @Test
+    void aDelayOverThirtyDaysIsRejected() {
+        String body = postExpectingBadRequest("{\"type\":\"send-email\",\"delaySeconds\":99999999}");
+
+        assertThat(body).contains("delaySeconds");
+        assertThat(repository.countByStatus()).isEmpty();
+    }
 }

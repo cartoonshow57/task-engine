@@ -21,30 +21,26 @@ public class TaskRepository {
     }
 
     public long insert(String type, String payloadJson, int maxAttempts) {
-        return jdbc.sql("""
-                INSERT INTO tasks (type, payload, max_attempts)
-                VALUES (:type, CAST(:payload AS jsonb), :maxAttempts)
-                RETURNING id
-                """)
-                .param("type", type)
-                .param("payload", payloadJson)
-                .param("maxAttempts", maxAttempts)
-                .query(Long.class)
-                .single();
+        return insert(type, payloadJson, maxAttempts, 0, null).id();
     }
 
-    public record InsertResult(long id, boolean created) {}
-
     public InsertResult insert(String type, String payloadJson, int maxAttempts, String idempotencyKey) {
+        return insert(type, payloadJson, maxAttempts, 0, idempotencyKey);
+    }
+
+    public InsertResult insert(String type, String payloadJson, int maxAttempts, int delaySeconds,
+                               String idempotencyKey) {
         Optional<Long> inserted = jdbc.sql("""
-                INSERT INTO tasks (type, payload, max_attempts, idempotency_key)
-                VALUES (:type, CAST(:payload AS jsonb), :maxAttempts, :key)
+                INSERT INTO tasks (type, payload, max_attempts, run_at, idempotency_key)
+                VALUES (:type, CAST(:payload AS jsonb), :maxAttempts,
+                        now() + (:delaySeconds * interval '1 second'), :key)
                 ON CONFLICT (idempotency_key) DO NOTHING
                 RETURNING id
                 """)
                 .param("type", type)
                 .param("payload", payloadJson)
                 .param("maxAttempts", maxAttempts)
+                .param("delaySeconds", delaySeconds)
                 .param("key", idempotencyKey, Types.VARCHAR)
                 .query(Long.class)
                 .optional();
@@ -57,6 +53,8 @@ public class TaskRepository {
                 .single();
         return new InsertResult(existing, false);
     }
+
+    public record InsertResult(long id, boolean created) {}
 
     public boolean matchesRequest(long id, String type, String payloadJson, int maxAttempts) {
         return jdbc.sql("""

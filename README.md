@@ -15,6 +15,7 @@ Built with Java 25, Spring Boot, PostgreSQL, Flyway, and Testcontainers.
 - **Ownership checks.** A worker that has lost its task cannot overwrite the new owner's result, and it logs a warning.
 - **Tested.** Automated tests run against a real PostgreSQL in Docker, including eight workers racing for 200 tasks, and the build runs on every push with GitHub Actions.
 - **Idempotency keys.** A client can send an `Idempotency-Key` header, so retrying a request after a timeout returns the original task instead of creating a duplicate. A unique index in PostgreSQL enforces this, even when retries arrive at the same instant.
+- **Delayed tasks.** A task can carry `delaySeconds` (up to 30 days) to run later. Workers skip it until it is due, with the same mechanism that holds back retries.
 
 
 ## Architecture
@@ -88,7 +89,7 @@ java -jar target/task-engine-0.0.1-SNAPSHOT.jar --server.port=8081
 
 | Request | Body | Response |
 |---|---|---|
-| `POST /tasks` | `type` (required), `maxAttempts` (optional, at least 1, default 3), `payload` (optional JSON object). Optional header `Idempotency-Key` (up to 200 characters). | `201` with `{"id": 1}` for a new task. `200` with the original id if the same key and request were already seen. `422` if the key was used for a different request. `400` with the reason if the request is invalid. |
+| `POST /tasks` | `type` (required), `maxAttempts` (optional, at least 1, default 3), `payload` (optional JSON object), `delaySeconds` (optional, 0 to 2,592,000, default 0). Optional header `Idempotency-Key` (up to 200 characters). | `201` with `{"id": 1}` for a new task. `200` with the original id if the same key and request were already seen. `422` if the key was used for a different request. `400` with the reason if the request is invalid. |
 | `GET /tasks/{id}` | none | `200` with the task, including its status, attempts, and payload. `404` if there is no such task. |
 | `GET /actuator/health` | none | `200` with a status of `UP` while the app is healthy. |
 
@@ -96,7 +97,7 @@ java -jar target/task-engine-0.0.1-SNAPSHOT.jar --server.port=8081
 
 | Status | Meaning |
 |---|---|
-| `PENDING` | Waiting to be claimed. It is either new, or waiting for its retry time. |
+| `PENDING` | Waiting to be claimed. It is new, waiting for its scheduled time, or waiting for its retry time. |
 | `RUNNING` | Claimed by a worker, which holds a lease on it. |
 | `SUCCEEDED` | Finished. |
 | `DEAD` | Used all its attempts without succeeding. The last error is kept in `last_error`. |
@@ -209,3 +210,4 @@ scripts/metrics.sh
 - **Finished tasks stay in the table.** At scale they would need archiving or partitioning.
 - **Retries have no jitter.** At scale, tasks that fail together would retry together.
 - **Polling.** Workers ask for work once a second. At larger scale, I would look at `LISTEN`/`NOTIFY` or a message broker, and at separate queues for different task types.
+- **No cancelling or rescheduling.** A task can't be cancelled or moved after it has been submitted, and there are no recurring tasks.
