@@ -10,6 +10,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -25,12 +26,14 @@ import io.micrometer.core.instrument.Timer;
 public class TaskWorker {
 
     private static final Logger log = LoggerFactory.getLogger(TaskWorker.class);
-    private static final int LEASE_SECONDS = 30;
-    private static final int HEARTBEAT_SECONDS = 10;
+    private static final int DEFAULT_LEASE_SECONDS = 30;
+    private static final long DEFAULT_HEARTBEAT_MILLIS = 10_000;
 
     private final TaskRepository repository;
     private final TaskHandler handler;
     private final EngineMetrics metrics;
+    private final int leaseSeconds;
+    private final long heartbeatMillis;
     private final String workerId = "worker-" + UUID.randomUUID().toString().substring(0, 8);
     private final ScheduledExecutorService heartbeats = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "heartbeat");
@@ -38,16 +41,24 @@ public class TaskWorker {
         return t;
     });
 
+    @Autowired
     public TaskWorker(TaskRepository repository, TaskHandler handler, EngineMetrics metrics) {
+        this(repository, handler, metrics, DEFAULT_LEASE_SECONDS, DEFAULT_HEARTBEAT_MILLIS);
+    }
+
+    public TaskWorker(TaskRepository repository, TaskHandler handler, EngineMetrics metrics,
+                      int leaseSeconds, long heartbeatMillis) {
         this.repository = repository;
         this.handler = handler;
         this.metrics = metrics;
+        this.leaseSeconds = leaseSeconds;
+        this.heartbeatMillis = heartbeatMillis;
     }
 
     @Scheduled(fixedDelay = 1000)
     public void poll() {
         Optional<Task> next;
-        while ((next = repository.claimNext(workerId, LEASE_SECONDS)).isPresent()) {
+        while ((next = repository.claimNext(workerId, leaseSeconds)).isPresent()) {
             run(next.get());
         }
     }
@@ -57,7 +68,7 @@ public class TaskWorker {
         metrics.taskClaimed();
         AtomicBoolean finished = new AtomicBoolean(false);
         ScheduledFuture<?> heartbeat = heartbeats.scheduleAtFixedRate(
-                () -> beat(task, finished), HEARTBEAT_SECONDS, HEARTBEAT_SECONDS, TimeUnit.SECONDS);
+                () -> beat(task, finished), heartbeatMillis, heartbeatMillis, TimeUnit.MILLISECONDS);
         Timer.Sample sample = metrics.startTimer();
         Exception failure = null;
         try {
@@ -90,7 +101,7 @@ public class TaskWorker {
 
     private void beat(Task task, AtomicBoolean finished) {
         try {
-            boolean stillMine = repository.extendLease(task.id(), workerId, LEASE_SECONDS);
+            boolean stillMine = repository.extendLease(task.id(), workerId, leaseSeconds);
             if (!stillMine && !finished.get()) {
                 log.warn("Lost ownership of task {}", task.id());
             }
