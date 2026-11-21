@@ -112,12 +112,18 @@ A worker claims the oldest due `PENDING` task, which becomes `RUNNING`. When the
 | A task keeps failing | After `maxAttempts` tries it becomes `DEAD` instead of retrying forever. | `aTaskBecomesDeadAfterItsLastFailedAttempt` |
 | Several workers look for work at once | The claim is a single SQL statement using `FOR UPDATE SKIP LOCKED`, so each task goes to exactly one worker. | `manyWorkersNeverClaimTheSameTask` (8 workers, 200 tasks) |
 | A worker crashes in the middle of a task | The task's lease runs out. A recovery job, which runs every 5 seconds, puts the task back in the queue. The crash costs the task one attempt, so a task that keeps killing workers ends up `DEAD`. | `expiredLeaseReturnsTheTaskToPending`, `aTaskWithNoAttemptsLeftBecomesDeadWhenItsLeaseExpires` |
-| A worker is slow but still alive | While a task runs, a heartbeat keeps extending its lease, so the recovery job leaves it alone. | `aHeartbeatSavesTheTaskFromRecovery`, `aTaskWithAValidLeaseIsLeftAlone` |
-| A worker reports on a task it no longer owns | Every update checks that the task is still `RUNNING` and still owned by that worker. If not, nothing changes and the worker logs a warning. | `anotherWorkerCannotFinishYourTask`, `anotherWorkerCannotRecordYourFailure`, `onlyTheOwnerCanExtendALease` |
+| A worker is slow but still alive | While a task runs, a heartbeat keeps extending its lease, so the recovery job leaves it alone. | `aHeartbeatSavesTheTaskFromRecovery`, `aTaskWithAValidLeaseIsLeftAlone` | `theHeartbeatKeepsALongTaskFromBeingRecovered` |
+| A worker reports on a task it no longer owns | Every update checks that the task is still `RUNNING` and still owned by that worker. If not, nothing changes and the worker logs a warning. | `anotherWorkerCannotFinishYourTask`, `anotherWorkerCannotRecordYourFailure`, `onlyTheOwnerCanExtendALease` | `aWorkerThatLostItsTaskCountsALostResultAndDoesNotOverwriteIt` |
 | A client sends an invalid request | The API answers `400` and says which field was wrong and why. | `emptyTypeIsRejectedAndNamesTheField`, `maxAttemptsBelowOneIsRejected`, `payloadThatIsNotAnObjectIsRejected` |
 | A client retries a request, for example after a timeout | With an `Idempotency-Key` header, the engine returns the original task instead of creating a second one. A unique index makes this hold even when retries arrive at the same instant. | `sameKeyTwiceCreatesOnlyOneTask`, `manyIdenticalRequestsAtTheSameInstantCreateOneTask`, `repeatedKeyReturnsTheSameTaskWith200`, `reusedKeyWithADifferentRequestIsRejectedWith422` |
 
 I also checked these cases by hand. I killed the app with `kill -9` in the middle of a task and restarted it. The recovery job put the task back, and it finished on its second attempt. With a 10-second lease and a 20-second task, the task ran three times and ended `DEAD` before the heartbeat existed. With the heartbeat, the same task ran once and succeeded. With two copies of the app working through six slow tasks, each task was claimed exactly once, in about half the time one copy needs.
+
+
+### Do the tests catch bugs?
+
+I checked the two most important concurrency tests by breaking the code on purpose. Removing `FOR UPDATE SKIP LOCKED` from the claim made the eight-workers test fail with 355 claims for 200 tasks. Replacing the heartbeat's lease extension with a no-op made the long-task test fail, because the recovery job took a task that was still running. In both cases the code was restored afterwards.
+
 
 ### Delivery guarantee
 
@@ -193,7 +199,7 @@ src/main/java/com/lakshya/taskengine/
 src/main/resources/db/migration/
             V1__create_tasks_table.sql, V2__add_idempotency_key.sql
 src/test/java/com/lakshya/taskengine/
-            TaskRepositoryTest, TaskApiTest, TestcontainersConfiguration
+            TaskRepositoryTest, TaskApiTest, TaskWorkerTest, TestcontainersConfiguration
             common/EngineMetricsTest
 .github/workflows/ci.yml
 docker-compose.yml
@@ -206,7 +212,7 @@ scripts/metrics.sh
 - **Idempotency keys never expire.** A key stays with its task for as long as the task is stored, and there is no cleanup yet.
 - **Metrics are only available through the Actuator endpoint.** There is no Prometheus export, dashboard, or alerting yet.
 - **No authentication.** The API and the Actuator endpoints are open, which is fine on a laptop but not on a server.
-- - **The worker loop has no automated tests of its own.** The repository, the HTTP endpoints, and the metrics are tested. The worker and the recovery job are covered only through the repository methods they call.
+- **The recovery job and the queue depth gauge have no tests of their own.** The repository, the HTTP endpoints, the metrics, and the worker loop are tested. The recovery job is covered only through the repository method it calls.
 - **Finished tasks stay in the table.** At scale they would need archiving or partitioning.
 - **Retries have no jitter.** At scale, tasks that fail together would retry together.
 - **Polling.** Workers ask for work once a second. At larger scale, I would look at `LISTEN`/`NOTIFY` or a message broker, and at separate queues for different task types.
